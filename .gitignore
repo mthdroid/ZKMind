@@ -22,8 +22,9 @@ dist/
 .DS_Store
 Thumbs.db
 
-# Deployment artifacts (keep in separate deploy step)
+# Deployment artifacts
 *.wasm.d
+*.wasm
 
 # Claude Code
 .claude/
