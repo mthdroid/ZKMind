@@ -19,7 +19,7 @@ import {
   OnChainGameState,
 } from '@/lib/contracts';
 import { getPublicKey, signTransaction, connectWallet } from '@/lib/wallet';
-import { generateProof } from '@/lib/noir';
+import { generateProof, computeCommitment } from '@/lib/noir';
 import CodeSetup from '@/components/CodeSetup';
 import GuessInput from '@/components/GuessInput';
 import GuessRow from '@/components/GuessRow';
@@ -79,26 +79,16 @@ export default function OnChainGame({ params }: { params: Promise<{ sessionId: s
       }))
     : [];
 
-  // Compute pedersen commitment hash as hex (mock - real would use Noir)
-  // For the demo, we use sha256 as a stand-in for pedersen_hash
-  const computeCommitment = (code: number[]): string => {
-    const data = new Uint8Array(code.length * 32);
-    for (let i = 0; i < code.length; i++) {
-      data[i * 32 + 31] = code[i]; // big-endian Field encoding
-    }
-    const hash = sha256(data);
-    return Buffer.from(hash).toString('hex');
-  };
-
-  // CodeMaker: commit secret code
+  // CodeMaker: commit secret code using real pedersen_hash
   const handleCommit = async (code: number[]) => {
     if (!publicKey) return;
     setSecretCode(code);
     setLoading(true);
     setError('');
-    setStatus('Committing secret code on-chain...');
+    setStatus('Computing Pedersen commitment...');
     try {
-      const commitment = computeCommitment(code);
+      const commitment = await computeCommitment(code);
+      setStatus('Committing secret code on-chain...');
       const tx = await buildCommitCode(publicKey, sid, publicKey, commitment);
       const signed = await signTransaction(tx);
       await submitTx(signed);

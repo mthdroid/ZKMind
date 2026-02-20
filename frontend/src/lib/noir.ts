@@ -8,13 +8,14 @@
  */
 
 import { Noir } from '@noir-lang/noir_js';
-import { UltraHonkBackend } from '@aztec/bb.js';
+import { UltraHonkBackend, BarretenbergSync, Fr } from '@aztec/bb.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 
 // Cached instances to avoid re-initialization
 let cachedCircuit: any = null;
 let cachedNoir: Noir | null = null;
 let cachedBackend: UltraHonkBackend | null = null;
+let cachedBb: BarretenbergSync | null = null;
 
 export interface ProofResult {
   proof: Uint8Array;
@@ -32,6 +33,30 @@ async function loadCircuit() {
   if (!response.ok) throw new Error('Failed to load circuit');
   cachedCircuit = await response.json();
   return cachedCircuit;
+}
+
+/**
+ * Get or init the BarretenbergSync instance for pedersen_hash.
+ */
+async function getBb(): Promise<BarretenbergSync> {
+  if (!cachedBb) {
+    cachedBb = await BarretenbergSync.initSingleton();
+  }
+  return cachedBb;
+}
+
+/**
+ * Compute pedersen_hash commitment matching the Noir circuit.
+ * Uses Barretenberg's native pedersen_hash with hashIndex=0 (default generator).
+ *
+ * This produces the exact same hash as Noir's `std::hash::pedersen_hash`.
+ */
+export async function computeCommitment(code: number[]): Promise<string> {
+  const bb = await getBb();
+  const fields = code.map(c => new Fr(BigInt(c)));
+  const hash: Fr = bb.pedersenHash(fields, 0);
+  // Fr.value is a Uint8Array(32), convert to 0x-prefixed hex
+  return '0x' + Array.from(hash.value).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
 /**
