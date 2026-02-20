@@ -1,0 +1,34 @@
+# Rust
+target/
+Cargo.lock
+
+# Noir
+circuits/target/
+
+# Node
+node_modules/
+.next/
+dist/
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Deployment artifacts (keep in separate deploy step)
+*.wasm.d
+
+# Claude Code
+.claude/
+
+# Internal planning docs
+HACKATHON_CONTEXT.md
+PLAN_STELLAR_*.md
+PROMPT_*.md

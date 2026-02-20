@@ -1,0 +1,6 @@
+[package]
+name = "mastermind"
+type = "bin"
+authors = [""]
+
+[dependencies]

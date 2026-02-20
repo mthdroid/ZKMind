@@ -1,0 +1,9 @@
+# Test case: secret=[0,1,2,3], guess=[0,3,1,2]
+# Expected: correct_position=1 (pos 0), correct_color=3 (colors 1,2,3 misplaced)
+# commitment = pedersen_hash([0, 1, 2, 3])
+
+secret_code = ["0", "1", "2", "3"]
+guess = ["0", "3", "1", "2"]
+correct_position = "1"
+correct_color = "3"
+commitment = "0x273ef8b93f4d4fcd3a70ca1e796ebf4435e158d1bf1e345c5fb912355b02a9ab"
