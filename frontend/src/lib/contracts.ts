@@ -29,7 +29,7 @@ async function buildContractTx(
   contractId: string,
   method: string,
   args: StellarSdk.xdr.ScVal[],
-  maxRetries = 2,
+  maxRetries = 1,
 ): Promise<StellarSdk.Transaction> {
   let lastError: Error | null = null;
 
@@ -197,13 +197,49 @@ export interface OnChainGameState {
 }
 
 /**
- * Query game state from the contract (read-only, no tx needed).
+ * Read game state directly from ledger storage (bypasses simulation entirely).
+ * This is the most reliable way to check on-chain state.
+ */
+export async function getGameDirect(sessionId: number): Promise<OnChainGameState | null> {
+  try {
+    // DataKey::Game(session_id) serializes as Vec<[Symbol("Game"), U32(sessionId)]>
+    const dataKey = StellarSdk.xdr.ScVal.scvVec([
+      StellarSdk.xdr.ScVal.scvSymbol('Game'),
+      StellarSdk.nativeToScVal(sessionId, { type: 'u32' }),
+    ]);
+
+    const contractAddr = new StellarSdk.Address(ZKMIND_CONTRACT_ID);
+    const ledgerKey = StellarSdk.xdr.LedgerKey.contractData(
+      new StellarSdk.xdr.LedgerKeyContractData({
+        contract: contractAddr.toScAddress(),
+        key: dataKey,
+        durability: StellarSdk.xdr.ContractDataDurability.temporary(),
+      })
+    );
+
+    const response = await rpc.getLedgerEntries(ledgerKey);
+    if (!response.entries || response.entries.length === 0) return null;
+
+    const entry = response.entries[0];
+    const contractData = entry.val.contractData();
+    const val = contractData.val();
+
+    return scValToGameState(val);
+  } catch (e) {
+    console.warn('[ZKMind] getGameDirect failed:', e);
+    return null;
+  }
+}
+
+/**
+ * Query game state from the contract via simulation.
  */
 export async function getGame(sessionId: number): Promise<OnChainGameState | null> {
   const contract = new StellarSdk.Contract(ZKMIND_CONTRACT_ID);
 
-  // Build a minimal read-only transaction
-  const account = new StellarSdk.Account('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF', '0');
+  // Use random sequence to prevent any RPC caching
+  const randomSeq = String(Math.floor(Math.random() * 2147483647));
+  const account = new StellarSdk.Account('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF', randomSeq);
   const tx = new StellarSdk.TransactionBuilder(account, {
     fee: '100',
     networkPassphrase: NETWORK_PASSPHRASE,
@@ -250,7 +286,7 @@ function scValToGameState(val: StellarSdk.xdr.ScVal): OnChainGameState {
     guess_count: fields['guess_count'].u32(),
     max_guesses: fields['max_guesses'].u32(),
     winner: fields['winner'].switch().name === 'scvVoid' ? null :
-      StellarSdk.Address.fromScVal(fields['winner'].vec()![0]).toString(),
+      StellarSdk.Address.fromScVal(fields['winner']).toString(),
     current_guess: parseVecU32(fields['current_guess']),
   };
 }

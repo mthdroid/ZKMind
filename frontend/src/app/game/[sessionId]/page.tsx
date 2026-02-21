@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, use } from 'react';
+import { useState, useEffect, useCallback, useRef, use } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { sha256 } from '@noble/hashes/sha2.js';
@@ -12,6 +12,7 @@ import {
 } from '@/lib/mastermind';
 import {
   getGame,
+  getGameDirect,
   buildCommitCode,
   buildSubmitGuess,
   buildSubmitFeedback,
@@ -40,6 +41,7 @@ export default function OnChainGame({ params }: { params: Promise<{ sessionId: s
   const [error, setError] = useState('');
   const [status, setStatus] = useState('');
   const [polling, setPolling] = useState(true);
+  const submittingRef = useRef(false); // Prevent double-submit even across re-renders
 
   // Connect wallet on mount
   useEffect(() => {
@@ -127,6 +129,12 @@ export default function OnChainGame({ params }: { params: Promise<{ sessionId: s
   // CodeMaker: compute and submit feedback with ZK proof
   const handleSubmitFeedback = async () => {
     if (!publicKey || !gameState || secretCode.length === 0) return;
+    // Prevent double-submit using ref (survives re-renders)
+    if (submittingRef.current) {
+      console.warn('[ZKMind] Feedback submission already in progress, ignoring click');
+      return;
+    }
+    submittingRef.current = true;
     setLoading(true);
     setPolling(false); // Pause polling during feedback to prevent state interference
     setError('');
@@ -165,21 +173,41 @@ export default function OnChainGame({ params }: { params: Promise<{ sessionId: s
         setStatus('Submitting feedback on-chain (proof fallback)...');
       }
 
-      // Pre-flight check: re-fetch game state and verify phase before submitting.
-      // This prevents submitting against a stale ledger state (e.g. if proof gen
-      // took a long time and the on-chain state changed).
-      const freshState = await getGame(sid);
-      if (!freshState) {
+      // Pre-flight: read game state directly from ledger (bypasses simulation)
+      setStatus('Verifying game state...');
+      const directState = await getGameDirect(sid);
+      const simState = await getGame(sid).catch(() => null);
+
+      // Log diagnostic comparison
+      console.log('[ZKMind] Pre-flight diagnostic:', {
+        directPhase: directState?.phase,
+        simPhase: simState?.phase,
+        directGuessCount: directState?.guess_count,
+        simGuessCount: simState?.guess_count,
+        directWinner: directState?.winner,
+        simWinner: simState?.winner,
+        feedback: { correctPosition: feedback.correctPosition, correctColor: feedback.correctColor },
+      });
+
+      const checkState = directState || simState;
+      if (!checkState) {
         throw new Error('Game not found on-chain. It may have expired.');
       }
-      if (freshState.phase !== 2) {
+      if (checkState.phase !== 2) {
+        // Game already moved past WaitingForFeedback (likely feedback already submitted)
+        if (checkState.phase === 3) {
+          setStatus('Game already finished!');
+          setGameState(checkState);
+          return;
+        }
         throw new Error(
-          `Cannot submit feedback: game is in phase "${PHASE_NAMES[freshState.phase] || freshState.phase}" ` +
-          `(expected "Waiting for Feedback"). Try refreshing the page.`
+          `Cannot submit feedback: game phase is ${checkState.phase} ` +
+          `("${PHASE_NAMES[checkState.phase] || 'Unknown'}"), expected 2 ("Waiting for Feedback"). ` +
+          `Direct=${directState?.phase}, Sim=${simState?.phase}`
         );
       }
 
-      setStatus('Submitting feedback on-chain (with auto-retry)...');
+      setStatus('Submitting feedback on-chain...');
       const tx = await buildSubmitFeedback(
         publicKey, sid, publicKey,
         feedback.correctPosition,
@@ -194,20 +222,36 @@ export default function OnChainGame({ params }: { params: Promise<{ sessionId: s
       } else {
         setStatus('Feedback + ZK proof submitted on-chain!');
       }
+
+      // Wait for ledger to close before reading updated state
+      await new Promise(r => setTimeout(r, 2000));
       await fetchGame();
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Failed to submit feedback';
-      // Add diagnostic info for contract errors
-      if (msg.includes('Error(Contract')) {
-        const freshState = await getGame(sid).catch(() => null);
-        const phaseInfo = freshState
-          ? ` (on-chain phase: ${PHASE_NAMES[freshState.phase] || freshState.phase}, guesses: ${freshState.guess_count})`
-          : ' (could not read game state)';
-        setError(msg + phaseInfo);
-      } else {
-        setError(msg);
+      // Add diagnostic info: read DIRECTLY from ledger (not simulation)
+      const directState = await getGameDirect(sid).catch(() => null);
+      const simState = await getGame(sid).catch(() => null);
+      const diag = `[Direct phase=${directState?.phase ?? 'null'}, Sim phase=${simState?.phase ?? 'null'}, guesses=${directState?.guess_count ?? simState?.guess_count ?? '?'}]`;
+
+      console.error('[ZKMind] submit_feedback error:', msg, diag);
+
+      if (directState && directState.phase === 3) {
+        // The first click actually succeeded! Game is finished.
+        setStatus('Game already finished! Refreshing...');
+        setError('');
+        setGameState(directState);
+        return;
       }
+      if (simState && simState.phase === 3) {
+        setStatus('Game already finished! Refreshing...');
+        setError('');
+        setGameState(simState);
+        return;
+      }
+
+      setError(`${msg} ${diag}`);
     } finally {
+      submittingRef.current = false;
       setLoading(false);
       setPolling(true); // Resume polling
     }
