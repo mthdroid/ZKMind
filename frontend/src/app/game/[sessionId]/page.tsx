@@ -207,13 +207,14 @@ export default function OnChainGame({ params }: { params: Promise<{ sessionId: s
         );
       }
 
-      setStatus('Submitting feedback on-chain...');
+      setStatus('Building feedback transaction...');
       const tx = await buildSubmitFeedback(
         publicKey, sid, publicKey,
         feedback.correctPosition,
         feedback.correctColor,
         proofHash,
       );
+      setStatus('Signing and submitting on-chain...');
       const signed = await signTransaction(tx);
       await submitTx(signed);
 

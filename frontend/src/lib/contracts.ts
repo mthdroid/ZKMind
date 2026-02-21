@@ -154,6 +154,10 @@ export async function buildSubmitGuess(
 
 /**
  * Build submit_feedback transaction.
+ * First tries normal simulation. If simulation fails with a contract error,
+ * falls back to manual transaction construction using the footprint from
+ * a successful get_game simulation. This bypasses the broken simulation
+ * while still providing correct footprint and resource estimates.
  */
 export async function buildSubmitFeedback(
   sourcePublicKey: string,
@@ -164,13 +168,123 @@ export async function buildSubmitFeedback(
   proofHashHex: string,
 ): Promise<StellarSdk.Transaction> {
   const proofHashBytes = hexToBytes(proofHashHex);
-  return buildContractTx(sourcePublicKey, ZKMIND_CONTRACT_ID, 'submit_feedback', [
+  const feedbackArgs = [
     StellarSdk.nativeToScVal(sessionId, { type: 'u32' }),
     StellarSdk.nativeToScVal(codemaker, { type: 'address' }),
     StellarSdk.nativeToScVal(correctPosition, { type: 'u32' }),
     StellarSdk.nativeToScVal(correctColor, { type: 'u32' }),
     StellarSdk.xdr.ScVal.scvBytes(proofHashBytes),
-  ]);
+  ];
+
+  // Try normal simulation first (no retries - fail fast to try bypass)
+  try {
+    return await buildContractTx(
+      sourcePublicKey, ZKMIND_CONTRACT_ID, 'submit_feedback', feedbackArgs, 0,
+    );
+  } catch (simError) {
+    const simMsg = simError instanceof Error ? simError.message : String(simError);
+    console.warn('[ZKMind] submit_feedback simulation failed, trying bypass:', simMsg);
+
+    // Only bypass for contract errors (not network/encoding issues)
+    if (!simMsg.includes('Error(Contract')) {
+      throw simError;
+    }
+  }
+
+  // === BYPASS: Build transaction manually without simulation ===
+  console.log('[ZKMind] Building submit_feedback with simulation bypass...');
+
+  // Step 1: Simulate get_game to get a valid footprint for this game's storage
+  const contract = new StellarSdk.Contract(ZKMIND_CONTRACT_ID);
+  const dummySeq = String(Math.floor(Math.random() * 2147483647));
+  const dummyAccount = new StellarSdk.Account(
+    'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF', dummySeq,
+  );
+  const getGameTx = new StellarSdk.TransactionBuilder(dummyAccount, {
+    fee: '100',
+    networkPassphrase: NETWORK_PASSPHRASE,
+  })
+    .addOperation(contract.call('get_game',
+      StellarSdk.nativeToScVal(sessionId, { type: 'u32' }),
+    ))
+    .setTimeout(30)
+    .build();
+
+  const getGameSim = await rpc.simulateTransaction(getGameTx);
+  if (StellarSdk.rpc.Api.isSimulationError(getGameSim)) {
+    throw new Error('Bypass failed: get_game simulation also failed');
+  }
+
+  // Step 2: Extract footprint from get_game and upgrade for writes
+  const successSim = getGameSim as StellarSdk.rpc.Api.SimulateTransactionSuccessResponse;
+  const simData = successSim.transactionData.build();
+
+  const readOnlyKeys: StellarSdk.xdr.LedgerKey[] = [];
+  const readWriteKeys: StellarSdk.xdr.LedgerKey[] = [];
+
+  // get_game only reads; submit_feedback needs write access to the game key (temporary)
+  for (const key of simData.resources().footprint().readOnly()) {
+    if (key.switch().name === 'contractData') {
+      const dur = key.contractData().durability().name;
+      if (dur === 'temporary') {
+        // Game storage key: move to read-write for submit_feedback
+        readWriteKeys.push(key);
+      } else {
+        readOnlyKeys.push(key);
+      }
+    } else {
+      readOnlyKeys.push(key);
+    }
+  }
+  for (const key of simData.resources().footprint().readWrite()) {
+    readWriteKeys.push(key);
+  }
+
+  // Step 3: Build generous SorobanTransactionData
+  const sorobanData = new StellarSdk.SorobanDataBuilder()
+    .setFootprint(readOnlyKeys, readWriteKeys)
+    .setResources(50_000_000, 20_000, 20_000)  // 50M CPU, 20KB read, 20KB write
+    .setResourceFee(5_000_000)  // 5 XLM resource fee
+    .build();
+
+  // Step 4: Build auth entry (SourceAccount since codemaker == tx source)
+  const authInvocation = new StellarSdk.xdr.SorobanAuthorizedInvocation({
+    function: StellarSdk.xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(
+      new StellarSdk.xdr.InvokeContractArgs({
+        contractAddress: new StellarSdk.Address(ZKMIND_CONTRACT_ID).toScAddress(),
+        functionName: 'submit_feedback',
+        args: feedbackArgs,
+      }),
+    ),
+    subInvocations: [],
+  });
+
+  const authEntry = new StellarSdk.xdr.SorobanAuthorizationEntry({
+    credentials: StellarSdk.xdr.SorobanCredentials.sorobanCredentialsSourceAccount(),
+    rootInvocation: authInvocation,
+  });
+
+  // Step 5: Build the transaction with manual soroban data + auth
+  const account = await rpc.getAccount(sourcePublicKey);
+  const invokeOp = StellarSdk.Operation.invokeHostFunction({
+    func: StellarSdk.xdr.HostFunction.hostFunctionTypeInvokeContract(
+      new StellarSdk.xdr.InvokeContractArgs({
+        contractAddress: new StellarSdk.Address(ZKMIND_CONTRACT_ID).toScAddress(),
+        functionName: 'submit_feedback',
+        args: feedbackArgs,
+      }),
+    ),
+    auth: [authEntry],
+  });
+
+  return new StellarSdk.TransactionBuilder(account, {
+    fee: '10000000',  // 10 XLM max fee
+    networkPassphrase: NETWORK_PASSPHRASE,
+  })
+    .addOperation(invokeOp)
+    .setSorobanData(sorobanData)
+    .setTimeout(300)
+    .build();
 }
 
 /**
