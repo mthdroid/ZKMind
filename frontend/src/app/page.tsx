@@ -10,11 +10,13 @@ export default function Home() {
   const [sessionId, setSessionId] = useState('');
   const [role, setRole] = useState<'codemaker' | 'codebreaker'>('codemaker');
   const [publicKey, setPublicKey] = useState<string | null>(null);
+  const [hasFreighter, setHasFreighter] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
+    isFreighterInstalled().then(setHasFreighter);
     getPublicKey().then(setPublicKey);
   }, []);
 
@@ -79,7 +81,7 @@ export default function Home() {
             disabled={connecting}
             className="w-full font-pixel text-xs px-6 py-3 rounded-lg bg-gradient-to-r from-purple-600 to-cyan-600 hover:from-purple-500 hover:to-cyan-500 text-white transition-all disabled:opacity-50"
           >
-            {connecting ? 'Connecting...' : isFreighterInstalled() ? 'Connect Freighter' : 'Install Freighter'}
+            {connecting ? 'Connecting...' : hasFreighter ? 'Connect Freighter' : 'Install Freighter'}
           </button>
         )}
       </div>

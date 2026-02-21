@@ -1,69 +1,71 @@
 /**
  * Wallet connection using Freighter (Stellar browser wallet).
  *
- * Freighter injects a global `window.freighterApi` object.
- * We detect it, request access, and provide sign helpers.
+ * Uses @stellar/freighter-api v6 package.
  */
 
 import * as StellarSdk from '@stellar/stellar-sdk';
+import {
+  isConnected as freighterIsConnected,
+  requestAccess,
+  getAddress,
+  signTransaction as freighterSignTx,
+} from '@stellar/freighter-api';
 import { NETWORK_PASSPHRASE } from './contracts';
 
-declare global {
-  interface Window {
-    freighterApi?: {
-      isConnected: () => Promise<boolean>;
-      getPublicKey: () => Promise<string>;
-      signTransaction: (
-        xdr: string,
-        opts: { networkPassphrase: string }
-      ) => Promise<string>;
-      getNetwork: () => Promise<string>;
-      requestAccess: () => Promise<{ error?: string }>;
-    };
+export async function isFreighterInstalled(): Promise<boolean> {
+  if (typeof window === 'undefined') return false;
+  try {
+    const result = await freighterIsConnected();
+    return result.isConnected;
+  } catch {
+    return false;
   }
-}
-
-export function isFreighterInstalled(): boolean {
-  return typeof window !== 'undefined' && !!window.freighterApi;
 }
 
 export async function connectWallet(): Promise<string> {
-  if (!isFreighterInstalled()) {
+  const installed = await isFreighterInstalled();
+  if (!installed) {
     throw new Error('Freighter wallet not installed. Get it at freighter.app');
   }
 
-  const api = window.freighterApi!;
-  const result = await api.requestAccess();
+  const result = await requestAccess();
   if (result.error) {
     throw new Error(`Freighter access denied: ${result.error}`);
   }
 
-  return api.getPublicKey();
+  return result.address;
 }
 
 export async function getPublicKey(): Promise<string | null> {
-  if (!isFreighterInstalled()) return null;
+  const installed = await isFreighterInstalled();
+  if (!installed) return null;
   try {
-    const connected = await window.freighterApi!.isConnected();
-    if (!connected) return null;
-    return window.freighterApi!.getPublicKey();
+    const result = await getAddress();
+    if (result.error) return null;
+    return result.address;
   } catch {
     return null;
   }
 }
 
 export async function signTransaction(tx: StellarSdk.Transaction): Promise<StellarSdk.Transaction> {
-  if (!isFreighterInstalled()) {
+  const installed = await isFreighterInstalled();
+  if (!installed) {
     throw new Error('Freighter wallet not installed');
   }
 
   const xdr = tx.toXDR();
-  const signedXdr = await window.freighterApi!.signTransaction(xdr, {
+  const result = await freighterSignTx(xdr, {
     networkPassphrase: NETWORK_PASSPHRASE,
   });
 
+  if (result.error) {
+    throw new Error(`Freighter sign failed: ${result.error}`);
+  }
+
   return StellarSdk.TransactionBuilder.fromXDR(
-    signedXdr,
+    result.signedTxXdr,
     NETWORK_PASSPHRASE,
   ) as StellarSdk.Transaction;
 }
