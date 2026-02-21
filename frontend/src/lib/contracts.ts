@@ -44,7 +44,16 @@ async function buildContractTx(
   // Simulate to get proper resource estimates
   const simulated = await rpc.simulateTransaction(tx);
   if (StellarSdk.rpc.Api.isSimulationError(simulated)) {
-    throw new Error(`Simulation failed: ${simulated.error}`);
+    // Extract readable error info from simulation failure
+    const errMsg = typeof simulated.error === 'string'
+      ? simulated.error
+      : JSON.stringify(simulated.error);
+    const events = 'events' in simulated && Array.isArray(simulated.events)
+      ? simulated.events.map((e: unknown) => String(e)).join('; ')
+      : '';
+    throw new Error(
+      `Simulation failed for ${method}: ${errMsg}${events ? ` | Events: ${events}` : ''}`
+    );
   }
 
   return StellarSdk.rpc.assembleTransaction(tx, simulated).build();

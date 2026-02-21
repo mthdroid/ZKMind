@@ -84,6 +84,7 @@ export default function OnChainGame({ params }: { params: Promise<{ sessionId: s
     if (!publicKey) return;
     setSecretCode(code);
     setLoading(true);
+    setPolling(false);
     setError('');
     setStatus('Computing Pedersen commitment...');
     try {
@@ -98,6 +99,7 @@ export default function OnChainGame({ params }: { params: Promise<{ sessionId: s
       setError(e instanceof Error ? e.message : 'Failed to commit');
     } finally {
       setLoading(false);
+      setPolling(true);
     }
   };
 
@@ -105,6 +107,7 @@ export default function OnChainGame({ params }: { params: Promise<{ sessionId: s
   const handleGuess = async (guess: number[]) => {
     if (!publicKey) return;
     setLoading(true);
+    setPolling(false);
     setError('');
     setStatus('Submitting guess on-chain...');
     try {
@@ -117,6 +120,7 @@ export default function OnChainGame({ params }: { params: Promise<{ sessionId: s
       setError(e instanceof Error ? e.message : 'Failed to submit guess');
     } finally {
       setLoading(false);
+      setPolling(true);
     }
   };
 
@@ -124,6 +128,7 @@ export default function OnChainGame({ params }: { params: Promise<{ sessionId: s
   const handleSubmitFeedback = async () => {
     if (!publicKey || !gameState || secretCode.length === 0) return;
     setLoading(true);
+    setPolling(false); // Pause polling during feedback to prevent state interference
     setError('');
     setStatus('Computing feedback...');
     try {
@@ -160,6 +165,20 @@ export default function OnChainGame({ params }: { params: Promise<{ sessionId: s
         setStatus('Submitting feedback on-chain (proof fallback)...');
       }
 
+      // Pre-flight check: re-fetch game state and verify phase before submitting.
+      // This prevents submitting against a stale ledger state (e.g. if proof gen
+      // took a long time and the on-chain state changed).
+      const freshState = await getGame(sid);
+      if (!freshState) {
+        throw new Error('Game not found on-chain. It may have expired.');
+      }
+      if (freshState.phase !== 2) {
+        throw new Error(
+          `Cannot submit feedback: game is in phase "${PHASE_NAMES[freshState.phase] || freshState.phase}" ` +
+          `(expected "Waiting for Feedback"). Try refreshing the page.`
+        );
+      }
+
       const tx = await buildSubmitFeedback(
         publicKey, sid, publicKey,
         feedback.correctPosition,
@@ -171,15 +190,25 @@ export default function OnChainGame({ params }: { params: Promise<{ sessionId: s
 
       if (feedback.correctPosition === CODE_LENGTH) {
         setStatus('Code cracked! Game over.');
-        setPolling(false);
       } else {
         setStatus('Feedback + ZK proof submitted on-chain!');
       }
       await fetchGame();
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Failed to submit feedback');
+      const msg = e instanceof Error ? e.message : 'Failed to submit feedback';
+      // Add diagnostic info for contract errors
+      if (msg.includes('Error(Contract')) {
+        const freshState = await getGame(sid).catch(() => null);
+        const phaseInfo = freshState
+          ? ` (on-chain phase: ${PHASE_NAMES[freshState.phase] || freshState.phase}, guesses: ${freshState.guess_count})`
+          : ' (could not read game state)';
+        setError(msg + phaseInfo);
+      } else {
+        setError(msg);
+      }
     } finally {
       setLoading(false);
+      setPolling(true); // Resume polling
     }
   };
 
