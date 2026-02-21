@@ -179,6 +179,7 @@ export default function OnChainGame({ params }: { params: Promise<{ sessionId: s
         );
       }
 
+      setStatus('Submitting feedback on-chain (with auto-retry)...');
       const tx = await buildSubmitFeedback(
         publicKey, sid, publicKey,
         feedback.correctPosition,

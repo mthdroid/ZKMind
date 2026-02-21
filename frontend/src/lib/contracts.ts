@@ -23,40 +23,59 @@ function hexToBytes(hex: string): Buffer {
   return Buffer.from(clean, 'hex');
 }
 
-// Helper: build a contract call transaction
+// Helper: build a contract call transaction with retry for transient errors
 async function buildContractTx(
   sourcePublicKey: string,
   contractId: string,
   method: string,
-  args: StellarSdk.xdr.ScVal[]
+  args: StellarSdk.xdr.ScVal[],
+  maxRetries = 2,
 ): Promise<StellarSdk.Transaction> {
-  const account = await rpc.getAccount(sourcePublicKey);
-  const contract = new StellarSdk.Contract(contractId);
+  let lastError: Error | null = null;
 
-  const tx = new StellarSdk.TransactionBuilder(account, {
-    fee: '1000000',
-    networkPassphrase: NETWORK_PASSPHRASE,
-  })
-    .addOperation(contract.call(method, ...args))
-    .setTimeout(300)
-    .build();
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (attempt > 0) {
+      // Wait for next ledger close (~5s on testnet) before retrying
+      await new Promise(r => setTimeout(r, 4000));
+    }
 
-  // Simulate to get proper resource estimates
-  const simulated = await rpc.simulateTransaction(tx);
-  if (StellarSdk.rpc.Api.isSimulationError(simulated)) {
-    // Extract readable error info from simulation failure
-    const errMsg = typeof simulated.error === 'string'
-      ? simulated.error
-      : JSON.stringify(simulated.error);
-    const events = 'events' in simulated && Array.isArray(simulated.events)
-      ? simulated.events.map((e: unknown) => String(e)).join('; ')
-      : '';
-    throw new Error(
-      `Simulation failed for ${method}: ${errMsg}${events ? ` | Events: ${events}` : ''}`
-    );
+    const account = await rpc.getAccount(sourcePublicKey);
+    const contract = new StellarSdk.Contract(contractId);
+
+    const tx = new StellarSdk.TransactionBuilder(account, {
+      fee: '1000000',
+      networkPassphrase: NETWORK_PASSPHRASE,
+    })
+      .addOperation(contract.call(method, ...args))
+      .setTimeout(300)
+      .build();
+
+    // Simulate to get proper resource estimates
+    const simulated = await rpc.simulateTransaction(tx);
+    if (StellarSdk.rpc.Api.isSimulationError(simulated)) {
+      const errMsg = typeof simulated.error === 'string'
+        ? simulated.error
+        : JSON.stringify(simulated.error);
+      const events = 'events' in simulated && Array.isArray(simulated.events)
+        ? simulated.events.map((e: unknown) => String(e)).join('; ')
+        : '';
+      lastError = new Error(
+        `Simulation failed for ${method}: ${errMsg}${events ? ` | Events: ${events}` : ''}`
+      );
+
+      // Retry on contract errors (possible RPC state lag between ledgers)
+      if (attempt < maxRetries && errMsg.includes('Error(Contract')) {
+        console.warn(`[ZKMind] ${method} simulation failed (attempt ${attempt + 1}/${maxRetries + 1}), retrying...`, errMsg);
+        continue;
+      }
+
+      throw lastError;
+    }
+
+    return StellarSdk.rpc.assembleTransaction(tx, simulated).build();
   }
 
-  return StellarSdk.rpc.assembleTransaction(tx, simulated).build();
+  throw lastError || new Error(`${method} failed after ${maxRetries + 1} attempts`);
 }
 
 // Helper: submit signed transaction and wait for result
